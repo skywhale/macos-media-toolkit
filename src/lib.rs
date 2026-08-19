@@ -19,6 +19,11 @@
 
 pub mod hevc;
 
+#[cfg(target_os = "macos")]
+mod slot;
+#[cfg(target_os = "macos")]
+pub mod videotoolbox;
+
 /// A tightly packed 32-bit BGRA frame (no row padding).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BgraFrame {
