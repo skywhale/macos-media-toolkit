@@ -63,8 +63,8 @@ pub struct DecodedFrame {
 }
 
 /// Shared with the C callback via the session ref-con. Decoding is synchronous
-/// (one frame in flight) so the `Mutex` never contends; it just hands the result
-/// back safely.
+/// (one frame in flight), so the `Mutex` never contends; it only transfers the
+/// result.
 struct DecoderShared {
     output: Mutex<Option<Result<BgraFrame, String>>>,
 }
@@ -74,8 +74,8 @@ struct DecoderShared {
 ///
 /// # Safety
 /// Registered as the session's `OutputCb<DecoderShared>`; VideoToolbox invokes
-/// it with the exact ref-con pointer we supplied. The pointer outlives the
-/// session (reclaimed only after the session is invalidated in teardown), and
+/// it with the ref-con pointer supplied at registration. That pointer outlives
+/// the session (it is reclaimed only after the session is invalidated), and
 /// decoding is synchronous with a single frame in flight, so there is no
 /// concurrent or dangling access.
 extern "C" fn output_callback(
@@ -119,8 +119,8 @@ struct DecoderSession {
     /// The format description the session was built from; also referenced by
     /// every `cm::SampleBuf` we submit for decode.
     format_desc: arc::R<cm::VideoFormatDesc>,
-    /// `Box::into_raw`'d ref-con handed to the output callback. Owned by us;
-    /// reclaimed on teardown (Drop).
+    /// `Box::into_raw`'d ref-con handed to the output callback, reclaimed in
+    /// `Drop`.
     shared: *mut DecoderShared,
 }
 
@@ -139,7 +139,7 @@ impl DecoderSession {
             parameter_sets.pps.len(),
         ];
         let format_desc = cm::VideoFormatDesc::with_hevc_param_sets(
-            3, &pointers, &sizes, // Our repackaged NALs use 4-byte length prefixes.
+            3, &pointers, &sizes, // Repackaged NALs carry 4-byte length prefixes.
             4, None,
         )
         .map_err(|e| anyhow!("failed to create HEVC format description: {e:?}"))?;
@@ -148,8 +148,7 @@ impl DecoderSession {
             output: Mutex::new(None),
         }));
 
-        // Request 32BGRA output so decoded frames land in the packed byte order
-        // callers get, without a colorspace conversion pass.
+        // 32BGRA output matches `BgraFrame`, so no conversion pass is needed.
         let dst_attrs = cf::DictionaryOf::<cf::String, cf::Type>::with_keys_values(
             &[cv::pixel_buffer_keys::pixel_format()],
             &[cv::PixelFormat::_32_BGRA.to_cf_number().as_type_ref()],
@@ -200,21 +199,19 @@ pub struct HevcDecoder {
     parameter_sets: Option<ParameterSets>,
     /// Scratch buffer for Annex B → length-prefixed repackaging.
     length_prefixed: Vec<u8>,
-    /// Whether we still need a keyframe to (re)synchronize before inter-coded
-    /// frames can be decoded. `true` initially, after `reset()`, and after any
-    /// per-frame decode failure; cleared once a keyframe decodes successfully.
-    /// See `decode` for why VideoToolbox needs this where NVDEC doesn't.
+    /// Set until a keyframe resynchronizes the decoder: initially, after
+    /// `reset`, and after any per-frame decode failure.
     waiting_for_keyframe: bool,
     /// Whether to repair slices referencing pictures missing from the DPB.
     conceal_missing_references: bool,
-    /// Parsed SPS/PPS of the current session, used to parse slice headers for
-    /// the RPS repair below. `None` (parse unsupported, or concealment off)
-    /// disables the repair.
+    /// Parsed SPS/PPS of the current session, needed to parse slice headers for
+    /// the RPS repair. `None` when concealment is off or the parameter sets fall
+    /// outside the supported profile, either of which disables the repair.
     header_info: Option<(hevc::SpsInfo, hevc::PpsInfo)>,
     /// POC lsbs assumed to be in VideoToolbox's DPB; used by the RPS repair (see `hevc`).
     decoded_poc_lsbs: Vec<u32>,
-    /// Rate limiting for the RPS-repair warning: the first in a quiet period logs
-    /// immediately, the rest fold into "and N more".
+    /// Rate limiting for the RPS-repair warning: the first in a quiet period is
+    /// logged immediately, the rest fold into "and N more".
     repair_log_last: Option<Instant>,
     /// Repairs suppressed since the last emitted warning.
     repairs_suppressed: u32,
@@ -241,18 +238,15 @@ impl HevcDecoder {
     pub fn decode(&mut self, annex_b: &[u8]) -> Result<DecodedFrame, DecodeError> {
         let nals = hevc::annex_b_nal_units(annex_b);
 
-        // 1. If the access unit carries parameter sets and they differ from the
-        //    current ones, (re)create the session. A keyframe always carries all
-        //    three; a parameter-set change means the encoder restarted (e.g. at a
-        //    new resolution), so the old session can no longer decode.
+        // Parameter sets differing from the session's mean the encoder restarted (at
+        // a new resolution, say), so the session can no longer decode and is rebuilt.
+        // Keyframes carry all three sets in band.
         if let Some(parameter_sets) = hevc::parameter_sets_from_nals(&nals)
             && self.parameter_sets.as_ref() != Some(&parameter_sets)
         {
             let session = DecoderSession::new(&parameter_sets)
                 .map_err(|e| DecodeError::Fatal(format!("{e:#}")))?;
-            // Parse the SPS/PPS for slice-header parsing (RPS repair). An
-            // unsupported bitstream feature disables the repair but not
-            // decoding itself.
+            // An unsupported bitstream feature disables the repair, not decoding.
             self.header_info = self
                 .conceal_missing_references
                 .then(|| {
@@ -264,36 +258,33 @@ impl HevcDecoder {
                         .ok()
                 })
                 .flatten();
-            // Replace after successful creation so a failure leaves the old
-            // session intact; dropping the old one invalidates it.
+            // Assigned only after successful creation, so a failure leaves the old
+            // session intact; dropping it invalidates it.
             self.session = Some(session);
             self.parameter_sets = Some(parameter_sets);
             self.decoded_poc_lsbs.clear();
         }
 
-        // 2. Still no session: the sender emitted inter frames before any keyframe
-        //    reached us. The caller must request a keyframe.
+        // No session yet: inter frames arrived before any keyframe.
         let session = self.session.as_ref().ok_or(DecodeError::MissingKeyframe)?;
 
-        // 2b. Out of sync and not a keyframe: don't submit — an inter frame can only
-        //     reference pictures we don't have. Ask for a keyframe instead.
+        // Out of sync and not a keyframe: an inter frame can only reference pictures
+        // the decoder does not hold, so submitting it would fail.
         let contains_keyframe = hevc::nals_contain_keyframe(&nals);
         if self.waiting_for_keyframe && !contains_keyframe {
             return Err(DecodeError::MissingKeyframe);
         }
 
-        // 3. Repackage Annex B → 4-byte length prefixes, skipping VPS/SPS/PPS
-        //    (they live in the format description). While repackaging, repair
-        //    slices whose RPS references pictures we never decoded —
-        //    VideoToolbox rejects these where NVDEC conceals; see the `hevc`
-        //    module docs.
+        // Repackage Annex B → 4-byte length prefixes, skipping VPS/SPS/PPS (they
+        // live in the format description), and repair slices whose RPS references
+        // pictures that were never decoded.
         self.length_prefixed.clear();
         // POC lsbs (current picture + retained references) to install as the
         // assumed DPB contents once this access unit decodes successfully.
         let mut dpb_after_decode: Option<Vec<u32>> = None;
-        // Only first-slice segments are rewritten, so a multi-slice picture would end
-        // up with disagreeing slices; skip the repair then and fail open (the
-        // supported encoders emit single-slice pictures).
+        // Only first-slice segments are rewritten, so repairing a multi-slice picture
+        // would leave its slices disagreeing; fail open instead. The supported
+        // encoders emit single-slice pictures.
         let repair_enabled = nals
             .iter()
             .filter(|n| hevc::nal_unit_type(n).is_some_and(|t| t <= 21))
@@ -309,40 +300,11 @@ impl HevcDecoder {
             if let Some((sps, pps)) = &self.header_info
                 && let Ok(info) = hevc::parse_slice(nal, sps, pps)
             {
-                let max = 1i64 << sps.poc_lsb_bits;
+                let poc_max = 1i64 << sps.poc_lsb_bits;
                 let poc = i64::from(info.poc_lsb.unwrap_or(0));
-                let ref_lsb = |delta: i32| ((poc + i64::from(delta)).rem_euclid(max)) as u32;
-                let decoded = &self.decoded_poc_lsbs;
+                let (entries, missing_used) =
+                    conceal_rps(&info.rps, poc, poc_max, &self.decoded_poc_lsbs);
 
-                // Partition the RPS: present entries stay; absent unused
-                // entries are dropped; absent *used* entries need a
-                // concealment target.
-                let mut entries = Vec::with_capacity(info.rps.len());
-                let mut missing_used = false;
-                for e in &info.rps {
-                    if decoded.contains(&ref_lsb(e.delta_poc)) {
-                        entries.push(*e);
-                    } else if e.used {
-                        missing_used = true;
-                    }
-                }
-                // Newest decoded picture (smallest POC distance behind the
-                // current one) as the concealment reference.
-                let conceal_delta = decoded
-                    .iter()
-                    .map(|&lsb| (poc - i64::from(lsb)).rem_euclid(max))
-                    .filter(|&d| d > 0)
-                    .min()
-                    .map(|d| -d as i32);
-                if missing_used && let Some(delta) = conceal_delta {
-                    match entries.iter_mut().find(|e| e.delta_poc == delta) {
-                        Some(e) => e.used = true,
-                        None => entries.push(RpsEntry {
-                            delta_poc: delta,
-                            used: true,
-                        }),
-                    }
-                }
                 // Repair only when it can produce a decodable P-slice; an
                 // unrepairable one is submitted as-is so the normal
                 // failure path (keyframe request) takes over.
@@ -350,32 +312,14 @@ impl HevcDecoder {
                 if repair_enabled && entries != info.rps && repairable {
                     // Fail open: an un-rewritable slice passes through unmodified.
                     if let Ok(rewritten) = hevc::rewrite_rps(nal, sps, pps, &entries) {
-                        let now = Instant::now();
-                        let within_window = self
-                            .repair_log_last
-                            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1));
-                        if within_window {
-                            self.repairs_suppressed += 1;
-                        } else {
-                            let suppressed = self.repairs_suppressed;
-                            log::warn!(
-                                "repaired slice RPS (poc lsb {poc}): kept {} of {} references{}{}",
-                                entries.len(),
-                                info.rps.len(),
-                                if missing_used {
-                                    ", concealed a missing used reference"
-                                } else {
-                                    ""
-                                },
-                                if suppressed > 0 {
-                                    format!(" (and {suppressed} more in the last second)")
-                                } else {
-                                    String::new()
-                                },
-                            );
-                            self.repair_log_last = Some(now);
-                            self.repairs_suppressed = 0;
-                        }
+                        log_repair(
+                            &mut self.repair_log_last,
+                            &mut self.repairs_suppressed,
+                            poc,
+                            entries.len(),
+                            info.rps.len(),
+                            missing_used,
+                        );
                         repaired = Some(rewritten);
                     }
                 }
@@ -385,7 +329,10 @@ impl HevcDecoder {
                     } else {
                         &info.rps
                     };
-                    let mut dpb: Vec<u32> = rps.iter().map(|e| ref_lsb(e.delta_poc)).collect();
+                    let mut dpb: Vec<u32> = rps
+                        .iter()
+                        .map(|e| ref_poc_lsb(poc, e.delta_poc, poc_max))
+                        .collect();
                     dpb.push(poc as u32);
                     dpb_after_decode = Some(dpb);
                 }
@@ -396,9 +343,8 @@ impl HevcDecoder {
             self.length_prefixed.extend_from_slice(bytes);
         }
 
-        // 4. Wrap the length-prefixed NALs in a SampleBuf and decode
-        //    synchronously; the output callback fills the shared slot before
-        //    `decode` returns (no ENABLE_ASYNCHRONOUS_DECOMPRESSION flag).
+        // Decode synchronously: without ENABLE_ASYNCHRONOUS_DECOMPRESSION the output
+        // callback fills the shared slot before `decode` returns.
         // SAFETY: `session.shared` is a live `DecoderShared` (from `Box::into_raw`,
         // reclaimed only when the `DecoderSession` is dropped); the raw deref does
         // not alias `self`.
@@ -412,8 +358,8 @@ impl HevcDecoder {
             .session
             .decode(&sample_buf, vt::DecodeFrameFlags::default());
 
-        // 5. Take the callback's output. A missing slot or an error status after
-        //    the session exists is a per-frame decode failure.
+        // An empty slot or an error status, the session having been created, is a
+        // per-frame decode failure.
         let output = shared
             .output
             .lock()
@@ -427,8 +373,8 @@ impl HevcDecoder {
             }) {
             Ok(frame) => frame,
             Err(msg) => {
-                // Per-frame failures (e.g. kVTVideoDecoderBadDataErr on reference loss) are
-                // recoverable: wait for a keyframe instead of tearing the decoder down.
+                // Per-frame failures (kVTVideoDecoderBadDataErr on reference loss, say)
+                // are recoverable: wait for a keyframe rather than tear the session down.
                 log::warn!("VideoToolbox per-frame decode failed, requesting a keyframe: {msg}");
                 self.waiting_for_keyframe = true;
                 return Err(DecodeError::Frame(msg));
@@ -459,6 +405,85 @@ impl HevcDecoder {
         self.header_info = None;
         self.decoded_poc_lsbs.clear();
     }
+}
+
+/// POC lsb of the picture `delta` away from `poc`, wrapping at `poc_max`.
+fn ref_poc_lsb(poc: i64, delta: i32, poc_max: i64) -> u32 {
+    (poc + i64::from(delta)).rem_euclid(poc_max) as u32
+}
+
+/// The reference picture set to submit in place of `rps`, given the pictures
+/// believed to be in the DPB, and whether a used reference was missing.
+///
+/// Entries naming pictures in the DPB are kept and absent unused entries are
+/// dropped. An absent *used* entry is remapped onto the newest picture the DPB
+/// does hold, which is what NVDEC's concealment amounts to; with an empty DPB
+/// there is no such picture and the caller submits the slice unrepaired.
+fn conceal_rps(rps: &[RpsEntry], poc: i64, poc_max: i64, decoded: &[u32]) -> (Vec<RpsEntry>, bool) {
+    let mut entries = Vec::with_capacity(rps.len());
+    let mut missing_used = false;
+    for entry in rps {
+        if decoded.contains(&ref_poc_lsb(poc, entry.delta_poc, poc_max)) {
+            entries.push(*entry);
+        } else if entry.used {
+            missing_used = true;
+        }
+    }
+
+    if missing_used {
+        // The newest decoded picture is the one at the smallest POC distance
+        // behind the current one.
+        let conceal_delta = decoded
+            .iter()
+            .map(|&lsb| (poc - i64::from(lsb)).rem_euclid(poc_max))
+            .filter(|&distance| distance > 0)
+            .min()
+            .map(|distance| -distance as i32);
+        if let Some(delta_poc) = conceal_delta {
+            match entries.iter_mut().find(|e| e.delta_poc == delta_poc) {
+                Some(entry) => entry.used = true,
+                None => entries.push(RpsEntry {
+                    delta_poc,
+                    used: true,
+                }),
+            }
+        }
+    }
+
+    (entries, missing_used)
+}
+
+/// Warn that a slice was repaired, at most once a second. Repairs suppressed in
+/// between are counted into the next warning.
+fn log_repair(
+    last: &mut Option<Instant>,
+    suppressed: &mut u32,
+    poc: i64,
+    kept: usize,
+    total: usize,
+    concealed: bool,
+) {
+    let now = Instant::now();
+    if last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(1)) {
+        *suppressed += 1;
+        return;
+    }
+
+    log::warn!(
+        "repaired slice RPS (poc lsb {poc}): kept {kept} of {total} references{}{}",
+        if concealed {
+            ", concealed a missing used reference"
+        } else {
+            ""
+        },
+        if *suppressed > 0 {
+            format!(" (and {suppressed} more in the last second)")
+        } else {
+            String::new()
+        },
+    );
+    *last = Some(now);
+    *suppressed = 0;
 }
 
 /// Wrap length-prefixed NAL data in a `cm::SampleBuf` referencing the given

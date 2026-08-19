@@ -17,6 +17,12 @@ use cidre::{
 };
 use std::{ffi::c_void, sync::Mutex};
 
+/// Timescale of the presentation timestamps handed to VideoToolbox, which
+/// requires them to increase strictly. Deriving the timescale from the frame
+/// rate instead would rescale every timestamp already submitted, so a rate
+/// change could move the next one backwards.
+const PTS_TIMESCALE: i32 = 90_000;
+
 /// How to create a [`HevcEncoder`] session.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderConfig {
@@ -43,8 +49,8 @@ pub struct EncodedFrame {
 }
 
 /// Shared with the C callback via the session ref-con. Encoding is synchronous
-/// (one frame in flight) so the `Mutex` never contends; it just hands the result
-/// back safely.
+/// (one frame in flight), so the `Mutex` never contends; it only transfers the
+/// result.
 struct EncoderShared {
     output: Mutex<Option<Result<EncodedFrame>>>,
 }
@@ -54,8 +60,8 @@ struct EncoderShared {
 ///
 /// # Safety
 /// Registered as the session's `OutputCallback<EncoderShared>`; VideoToolbox
-/// invokes it with the exact ref-con pointer we supplied. The pointer outlives
-/// the session (reclaimed only after the session is invalidated in teardown),
+/// invokes it with the ref-con pointer supplied at registration. That pointer
+/// outlives the session (it is reclaimed only after the session is invalidated),
 /// and encoding is synchronous with a single frame in flight, so there is no
 /// concurrent or dangling access.
 extern "C" fn output_callback(
@@ -87,8 +93,8 @@ fn build_encoded_frame(
     let block = sample
         .data_buf()
         .ok_or_else(|| anyhow!("encoded sample has no data buffer"))?;
-    // The block buffer holds 4-byte length-prefixed NALs; make it contiguous
-    // (cheaply, if it already is) before converting to Annex B.
+    // The block buffer holds 4-byte length-prefixed NALs, contiguous only after
+    // this call; it is free when they already are.
     let contiguous = match block.try_contiguous_buf() {
         Some(contiguous) => contiguous,
         None => block
@@ -126,15 +132,15 @@ fn build_encoded_frame(
 /// A synchronous hardware HEVC encoder built on VideoToolbox.
 pub struct HevcEncoder {
     session: arc::R<vt::CompressionSession>,
-    /// `Box::into_raw`'d ref-con handed to the output callback. Owned by us;
-    /// reclaimed on teardown (Drop / session recreation).
+    /// `Box::into_raw`'d ref-con handed to the output callback, reclaimed in
+    /// `Drop` and on session recreation.
     shared: *mut EncoderShared,
     /// Frames seen since the last keyframe.
     seen_frames: usize,
     keyframe_interval: usize,
     frame_rate: f64,
     average_bitrate_bps: u32,
-    /// Monotonic presentation timestamp counter (frame index).
+    /// Presentation timestamp of the next frame, in [`PTS_TIMESCALE`] ticks.
     pts: i64,
     /// Resolution the current session was created at; a change recreates it.
     width: u32,
@@ -199,7 +205,7 @@ impl HevcEncoder {
         };
 
         let mut configure = || -> Result<()> {
-            let fps = frame_rate_to_timescale(frame_rate);
+            let fps = rounded_frame_rate(frame_rate);
 
             let bitrate = cf::Number::from_i32(bitrate_bps as i32);
             let expected_frame_rate = cf::Number::from_i32(fps);
@@ -255,7 +261,6 @@ impl HevcEncoder {
             force_keyframe = true;
         }
 
-        // 1. Keyframe cadence.
         let force_keyframe = force_keyframe || self.seen_frames >= self.keyframe_interval;
         if force_keyframe {
             self.seen_frames = 0;
@@ -272,14 +277,13 @@ impl HevcEncoder {
 
         let pixel_buf = self.make_pixel_buffer(bgra, width, height)?;
 
-        // 2. Encode synchronously: clear the output slot, submit one frame, then
-        //    flush so the output callback fills the slot before we read it.
+        // Encode synchronously: clear the output slot, submit one frame, then flush,
+        // which runs the output callback before the slot is read below.
         // SAFETY: `self.shared` is a live `EncoderShared` (from `Box::into_raw`,
         // reclaimed only in teardown); the raw deref does not alias `self`.
         let shared = unsafe { &*self.shared };
         *shared.output.lock().expect("encoder output mutex poisoned") = None;
 
-        let fps = frame_rate_to_timescale(self.frame_rate);
         let frame_props = force_keyframe.then(|| {
             cf::DictionaryOf::<cf::String, cf::Type>::with_keys_values(
                 &[frame_keys::force_key_frame()],
@@ -287,30 +291,41 @@ impl HevcEncoder {
             )
         });
 
+        let frame_ticks = self.frame_duration_ticks();
         self.session
             .encode_frame(
                 &pixel_buf,
-                cm::Time::new(self.pts, fps),
-                cm::Time::new(1, fps),
+                cm::Time::new(self.pts, PTS_TIMESCALE),
+                cm::Time::new(frame_ticks, PTS_TIMESCALE),
                 frame_props.as_deref(),
                 std::ptr::null_mut(),
                 &mut None,
             )
             .map_err(|e| anyhow!("VTCompressionSessionEncodeFrame failed: {e:?}"))?;
-        self.pts += 1;
+        self.pts += frame_ticks;
 
         self.session
             .complete_all()
             .map_err(err("VTCompressionSessionCompleteFrames failed"))?;
 
-        // 3. Take the callback's output (Annex B with in-band parameter sets on
-        //    keyframes).
+        // Annex B, with in-band parameter sets on keyframes.
         shared
             .output
             .lock()
             .expect("encoder output mutex poisoned")
             .take()
             .ok_or_else(|| anyhow!("encoder produced no output for the submitted frame"))?
+    }
+
+    /// One frame's worth of [`PTS_TIMESCALE`] ticks, bounded so the timestamp
+    /// keeps advancing whatever frame rate a caller supplies.
+    fn frame_duration_ticks(&self) -> i64 {
+        let ticks = f64::from(PTS_TIMESCALE) / self.frame_rate;
+        if ticks.is_finite() {
+            (ticks.round() as i64).clamp(1, i64::from(PTS_TIMESCALE))
+        } else {
+            i64::from(PTS_TIMESCALE)
+        }
     }
 
     /// Copy tightly-packed BGRA into a new 32BGRA `cv::PixelBuf`, honoring the
@@ -328,9 +343,10 @@ impl HevcEncoder {
         let mut pixel_buf = cv::PixelBuf::new(width, height, cv::PixelFormat::_32_BGRA, None)
             .map_err(|e| anyhow!("failed to create pixel buffer: {e:?}"))?;
 
-        // SAFETY: we lock the base address for the duration of the copy and
-        // unlock before returning; the copied rows stay within the locked
-        // buffer (`height` rows of `src_stride` bytes at `bytes_per_row` stride).
+        // SAFETY: the base address is locked for the duration of the copy and
+        // unlocked before returning. The buffer was just created as `_32_BGRA` at
+        // `width` x `height`, so `bytes_per_row >= src_stride` and the `height`
+        // rows written stay inside it.
         unsafe {
             pixel_buf
                 .lock_base_addr(cv::pixel_buffer::LockFlags::DEFAULT)
@@ -400,7 +416,7 @@ impl HevcEncoder {
             .set_prop(keys::avarage_bit_rate(), Some(bitrate.as_type_ref()))
             .map_err(|e| anyhow!("failed to update AverageBitRate: {e:?}"))?;
 
-        let expected_frame_rate = cf::Number::from_i32(frame_rate_to_timescale(frame_rate));
+        let expected_frame_rate = cf::Number::from_i32(rounded_frame_rate(frame_rate));
         self.session
             .set_prop(
                 keys::expected_frame_rate(),
@@ -422,8 +438,8 @@ impl Drop for HevcEncoder {
     }
 }
 
-/// Timescale (and expected frame rate) for a floating-point frame rate, clamped
-/// to a valid positive integer.
-fn frame_rate_to_timescale(frame_rate: f64) -> i32 {
+/// A frame rate rounded to the positive integer the VideoToolbox properties and
+/// the tick arithmetic both need.
+fn rounded_frame_rate(frame_rate: f64) -> i32 {
     frame_rate.round().max(1.0) as i32
 }
