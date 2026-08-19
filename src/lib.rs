@@ -3,7 +3,7 @@
 //! The crate wraps Apple's capture and codec frameworks — AVFoundation,
 //! ScreenCaptureKit and VideoToolbox — behind small, blocking, frames-in /
 //! frames-out APIs, with no runtime, no GPU API and no callbacks of its own.
-//! It also carries a portable HEVC bitstream module that has no macOS
+//! It also carries [`hevc`], a portable HEVC bitstream module with no macOS
 //! dependency at all.
 //!
 //! Frames cross the API boundary as [`BgraFrame`], a tightly packed 32-bit BGRA
@@ -16,6 +16,8 @@
 //! requires Screen Recording (System Settings → Privacy & Security). Both are
 //! requested by the OS on first use of the corresponding framework; without
 //! them, opening a capture fails.
+
+pub mod hevc;
 
 /// A tightly packed 32-bit BGRA frame (no row padding).
 #[derive(Debug, Clone, PartialEq, Eq)]
