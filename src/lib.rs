@@ -20,6 +20,10 @@
 pub mod hevc;
 
 #[cfg(target_os = "macos")]
+pub mod camera;
+#[cfg(target_os = "macos")]
+pub mod screen;
+#[cfg(target_os = "macos")]
 mod slot;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
