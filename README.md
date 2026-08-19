@@ -4,12 +4,12 @@ Camera and screen capture plus hardware HEVC encode/decode for macOS
 (AVFoundation, ScreenCaptureKit, VideoToolbox), with portable HEVC bitstream
 tools.
 
-The crate wraps Apple's media frameworks behind small, blocking, frames-in /
-frames-out APIs. There is no runtime, no GPU API, no actor framework and no
-callback of the crate's own: you open a capture and take frames from it, or you
-hand the codec bytes and get bytes back. Frames cross the boundary as
-`BgraFrame`, tightly packed 32-bit BGRA — the format Apple's capture and codec
-hardware works in natively, so no conversion pass is hidden inside the library.
+The crate wraps Apple's media frameworks behind blocking, frames-in / frames-out
+APIs: a capture is opened and drained, and the codec exchanges byte buffers. No
+async runtime, GPU context, actor framework or caller-supplied callback is
+involved. Frames cross the boundary as `BgraFrame`, tightly packed 32-bit BGRA —
+the format Apple's capture and codec hardware produces and consumes natively, so
+the library performs no colorspace conversion.
 
 - `camera` — an AVFoundation capture session on a chosen device, with explicit
   format and frame-rate pinning.
@@ -29,8 +29,12 @@ will change as more of it is used outside its original home.
 ## Camera
 
 ```rust
-use macos_toolkit::camera::{Camera, CameraConfig};
+use macos_toolkit::{Authorization, camera::{Camera, CameraConfig}};
 use std::time::Duration;
+
+// AVFoundation delivers no frames at all without permission, so resolve it
+// first; macOS asks once and remembers the answer.
+assert_eq!(Camera::request_access(Duration::from_secs(60)), Authorization::Authorized);
 
 let camera = Camera::open(&CameraConfig {
     device_name: None, // Or a substring of a name from `Camera::device_names()`.
@@ -56,8 +60,12 @@ backlog.
 ## Screen
 
 ```rust
-use macos_toolkit::screen::{ScreenCapture, ScreenCaptureConfig};
+use macos_toolkit::{Authorization, screen::{ScreenCapture, ScreenCaptureConfig}};
 use std::time::Duration;
+
+// Screen Recording is granted per launch: a user who accepts this prompt
+// authorizes the *next* run, not this one.
+assert_eq!(ScreenCapture::request_access(), Authorization::Authorized);
 
 let screen = ScreenCapture::open(&ScreenCaptureConfig {
     display_index: None, // Main display.
@@ -72,11 +80,11 @@ let frame = screen.take_frame(Duration::from_millis(100));
 ```
 
 ScreenCaptureKit delivers a frame only when the screen content changes, so
-`take_frame` on a static screen returns `None` however long you wait. Consumers
-that need a steady cadence — an encoder, say — must decide what to do with the
-gap; re-serving the last frame is the usual answer. If the OS stops the stream
-(display disconnected, permission revoked) it never recovers: check
-`is_stopped()` and open a new capture.
+`take_frame` returns `None` on a static screen regardless of the timeout.
+Consumers requiring a steady cadence must supply their own gap policy;
+re-serving the last frame is the usual one. A stream the OS stops (display
+disconnected, permission revoked) never recovers, so `is_stopped()` reports the
+condition and the capture must be reopened.
 
 ## Encode and decode
 
@@ -99,12 +107,12 @@ let decoded = decoder.decode(&encoded.annex_b)?;
 assert_eq!(decoded.frame.width, frame.width);
 ```
 
-Both directions are synchronous with a single frame in flight, so neither needs
-a thread or a runtime. The encoder emits Annex B with in-band VPS/SPS/PPS on
-keyframes; passing `encode` a new resolution transparently recreates the session
-and makes that frame a keyframe. The decoder builds its session lazily from the
-first keyframe's parameter sets, and returns `DecodeError::MissingKeyframe`
-until one arrives.
+Both directions are synchronous with a single frame in flight, so neither
+requires a thread or a runtime. The encoder emits Annex B with in-band
+VPS/SPS/PPS on keyframes; a new resolution passed to `encode` recreates the
+session and makes that frame a keyframe. The decoder builds its session lazily
+from the first keyframe's parameter sets and returns
+`DecodeError::MissingKeyframe` until one arrives.
 
 ### VideoToolbox vs NVDEC loss behavior
 
@@ -119,8 +127,8 @@ artifacted frame. VideoToolbox rejects the slice outright with
 recovery keyframe, the first P-slice predicts from an intermediate picture the
 decoder never decoded, fails, and arms the next keyframe request — forever.
 
-`HevcDecoder` therefore tracks the picture order counts it believes are in the
-hardware DPB and, before submitting an access unit, repairs slices that name
+`HevcDecoder` therefore tracks the picture order counts presumed to be in the
+hardware DPB and, before submitting an access unit, repairs slices naming
 pictures it never decoded: a missing *used* reference is remapped to the newest
 picture actually in the DPB, and keep-alive entries for pictures that were never
 decoded are dropped. Every other header field and the whole slice payload are
@@ -128,19 +136,33 @@ preserved byte for byte. The repair is fail-open — a slice the parser does not
 understand is submitted untouched, falling back to ordinary keyframe recovery —
 and can be turned off with `DecoderConfig { conceal_missing_references: false }`.
 
-The machinery behind this lives in the `hevc` module and is usable on its own,
-on any platform: `parse_sps`, `parse_pps`, `parse_slice` and `rewrite_rps`, plus
+The machinery behind this lives in the `hevc` module and is usable on its own on
+any platform: `parse_sps`, `parse_pps`, `parse_slice` and `rewrite_rps`, plus
 the Annex B framing helpers.
+
+## Examples
+
+```text
+cargo run --example camera_capture             # save a camera frame as PPM
+cargo run --example camera_capture -- FaceTime # select a device by name
+cargo run --example screen_capture             # save a display frame as PPM
+cargo run --example encode_decode              # encode and decode, writing encoded.h265
+cargo run --example hevc_dump -- encoded.h265  # print a stream's NAL structure
+```
+
+`hevc_dump` uses only the `hevc` module and runs on any platform. The others
+need macOS and the corresponding permission; set `RUST_LOG=info` to see the
+library's diagnostics.
 
 ## Prior art
 
-Parts of this space are covered elsewhere; this crate exists for the parts that
-weren't, and for having one delivery model across all of them.
+Parts of this space are covered elsewhere. This crate addresses the parts that
+are not, and unifies the delivery model across all of them.
 
 - Screen capture is the crowded corner:
   [screencapturekit](https://github.com/doom-fish/screencapturekit-rs) is
-  actively maintained and exposes the same ScreenCaptureKit knobs. Use it if
-  screen capture is all you need.
+  actively maintained and exposes the same ScreenCaptureKit controls, and is the
+  better choice when only screen capture is needed.
 - Camera capture with working frame-rate control is not covered:
   [nokhwa](https://github.com/l1npengtul/nokhwa)'s AVFoundation backend
   documents its FPS adjustment as non-functional, and the rest of the field is
@@ -150,8 +172,8 @@ weren't, and for having one delivery model across all of them.
   [videotoolbox](https://github.com/doom-fish/videotoolbox-rs)) but none offer
   synchronous Annex B in/out with in-band parameter sets — the shape a network
   streaming pipeline wants.
-- HEVC slice-header parsing with bit-exact *rewriting* exists nowhere else that
-  we could find; [hevc_parser](https://github.com/quietvoid/hevc_parser) stops
+- HEVC slice-header parsing with bit-exact *rewriting* has no other known
+  implementation; [hevc_parser](https://github.com/quietvoid/hevc_parser) stops
   parsing before the slice-header RPS and is parse-only.
 
 The Apple bindings underneath are [cidre](https://github.com/yury/cidre) —
@@ -165,7 +187,13 @@ churn at upgrades.
   hardware support, which every Apple silicon Mac and every Intel Mac since
   Skylake has.
 - The Camera privacy permission for `camera`, and Screen Recording for `screen`
-  (System Settings → Privacy & Security). Without them, opening a capture fails.
+  (System Settings → Privacy & Security). Both backends expose `authorization()`
+  and `request_access()` returning the same `Authorization`, and both `open()`
+  calls fail with an actionable error rather than returning a capture that never
+  produces a frame. Two platform quirks are worth knowing: macOS can only prompt
+  a process it can attribute the prompt to, so a bare binary run from a
+  non-interactive shell may be refused without any prompt appearing; and a
+  Screen Recording grant takes effect only at the next launch.
 - The `hevc` module has none of the above requirements and builds on any
   platform.
 
