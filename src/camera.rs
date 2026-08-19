@@ -8,18 +8,18 @@
 #![expect(clippy::useless_transmute)]
 
 use crate::{
-    BgraFrame,
+    Authorization, BgraFrame,
     slot::{FrameSlot, store_frame},
 };
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use cidre::{
     arc, av,
     av::capture::{VideoDataOutputSampleBufDelegate, VideoDataOutputSampleBufDelegateImpl},
-    cm, cv, define_obj_type, dispatch, ns, objc,
+    blocks, cm, cv, define_obj_type, dispatch, ns, objc,
     objc::Obj as _,
 };
 use log::*;
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, sync::mpsc, time::Duration};
 
 /// How to open a [`Camera`].
 #[derive(Debug, Clone, PartialEq)]
@@ -83,8 +83,8 @@ pub struct Camera {
 
     slot: Arc<FrameSlot>,
 
-    // Objects that must outlive the session. The `AVCaptureVideoDataOutput` holds
-    // its delegate weakly, so we keep a strong reference here.
+    // Objects that must outlive the session. `AVCaptureVideoDataOutput` holds its
+    // delegate weakly, hence the strong reference here.
     session: arc::R<av::CaptureSession>,
     device: arc::R<av::CaptureDevice>,
     _input: arc::R<av::CaptureDeviceInput>,
@@ -94,6 +94,53 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// Whether this process may capture from a camera. AVFoundation
+    /// distinguishes all four states.
+    pub fn authorization() -> Authorization {
+        match av::CaptureDevice::authorization_status_for_media_type(av::MediaType::video()) {
+            Ok(av::AuthorizationStatus::Authorized) => Authorization::Authorized,
+            Ok(av::AuthorizationStatus::Denied) => Authorization::Denied,
+            Ok(av::AuthorizationStatus::Restricted) => Authorization::Restricted,
+            Ok(av::AuthorizationStatus::NotDetermined) => Authorization::NotDetermined,
+            Err(e) => {
+                warn!("could not query camera authorization status: {e:?}");
+                Authorization::NotDetermined
+            }
+        }
+    }
+
+    /// Ask the user for camera access, blocking up to `timeout` for an answer,
+    /// and report the resulting authorization.
+    ///
+    /// macOS asks once and remembers the answer, so subsequent calls return the
+    /// standing decision without prompting. A bundled application must declare
+    /// `NSCameraUsageDescription` in its Info.plist; the system terminates
+    /// processes that request access without it. A bare binary that macOS cannot
+    /// attribute a prompt to — one launched from a non-interactive shell, say —
+    /// is refused outright and stays [`Authorization::NotDetermined`].
+    pub fn request_access(timeout: Duration) -> Authorization {
+        let status = Self::authorization();
+        if status != Authorization::NotDetermined {
+            return status;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let mut block = blocks::SendBlock::<fn(bool)>::new1(move |_granted: bool| {
+            let _ = tx.send(());
+        });
+        match av::CaptureDevice::request_access_for_media_type_ch(
+            av::MediaType::video(),
+            &mut block,
+        ) {
+            Ok(()) => {
+                let _ = rx.recv_timeout(timeout);
+            }
+            Err(e) => warn!("could not request camera access: {e:?}"),
+        }
+
+        Self::authorization()
+    }
+
     /// Localized names of the available video capture devices.
     pub fn device_names() -> Vec<String> {
         discovered_devices()
@@ -111,9 +158,18 @@ impl Camera {
             ..
         } = *config;
 
-        match av::CaptureDevice::authorization_status_for_media_type(av::MediaType::video()) {
-            Ok(status) => info!("AVFoundation camera authorization status: {status:?}"),
-            Err(e) => warn!("Could not query camera authorization status: {e:?}"),
+        match Self::authorization() {
+            Authorization::Authorized => {}
+            Authorization::NotDetermined => {
+                bail!("camera access has not been granted; call Camera::request_access first")
+            }
+            Authorization::Denied => bail!(
+                "camera access was denied; grant it in System Settings → Privacy & \
+                 Security → Camera"
+            ),
+            Authorization::Restricted => {
+                bail!("camera access is restricted by policy and cannot be granted")
+            }
         }
 
         let mut device = find_device(config.device_name.as_deref())?;
@@ -172,16 +228,16 @@ impl Camera {
 
         session.start_running();
 
-        // Best-effort format + frame-rate pin. The auto-negotiated format can top
-        // out below the configured rate, making the duration pin fail and the
-        // camera silently deliver its default rate; pick a rate-capable format
-        // first. On any failure the camera falls back to its default rate.
+        // The auto-negotiated format can top out below the configured rate, which
+        // makes the frame-duration pin fail and leaves the camera silently
+        // delivering its default rate; select a rate-capable format first. Every
+        // step below is best-effort, and failure leaves the default rate in place.
         {
             let selected = select_format(&device, width, height, frame_rate);
 
-            // Only override the active format when it gains us the configured
-            // rate: forcing a same-rate format can stop frame delivery (see the
-            // pixel-subtype preference in `select_format`).
+            // Override the active format only when doing so gains the configured
+            // rate: forcing a same-rate format can stop frame delivery entirely
+            // (see the pixel-subtype preference in `select_format`).
             let (activate_format, pin_rate) = match &selected {
                 Some((format, max_rate, true)) => (Some(format), frame_rate.min(*max_rate)),
                 Some((_, max_rate, false)) => {
@@ -294,12 +350,12 @@ type FormatRank = (u8, i64, u8);
 /// Pick the device format that best matches the requested size and frame rate.
 ///
 /// Returns the chosen format, the highest frame rate it supports, and whether
-/// that reaches the requested rate. Rate capability is primary: a rate-capable
+/// that reaches the requested rate. Rate capability ranks first: a rate-capable
 /// format wins even at larger dimensions, because the output scaler delivers the
-/// configured size from any covering format. Among rate-capable formats, prefer
-/// the smallest covering area, then the active format's pixel subtype (the one
-/// known compatible with the rest of the capture pipeline).
-/// `None` when no format covers the resolution.
+/// configured size from any covering format. Ties break on the smallest covering
+/// area, then on matching the active format's pixel subtype, which the running
+/// session is already configured for. `None` when no format covers the
+/// resolution.
 fn select_format(
     device: &av::CaptureDevice,
     width: u32,

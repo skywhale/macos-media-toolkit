@@ -1,30 +1,35 @@
 //! Camera and screen capture plus hardware HEVC encode/decode for macOS.
 //!
-//! The crate wraps Apple's capture and codec frameworks — AVFoundation,
-//! ScreenCaptureKit and VideoToolbox — behind small, blocking, frames-in /
-//! frames-out APIs, with no runtime, no GPU API and no callbacks of its own.
-//! It also carries [`hevc`], a portable HEVC bitstream module with no macOS
-//! dependency at all.
+//! The `camera`, `screen` and `videotoolbox` modules wrap AVFoundation,
+//! ScreenCaptureKit and VideoToolbox behind blocking, frames-in / frames-out
+//! APIs requiring no async runtime, no GPU context and no caller-supplied
+//! callbacks. [`hevc`] holds portable HEVC bitstream tools and compiles on every
+//! platform.
 //!
-//! Frames cross the API boundary as [`BgraFrame`], a tightly packed 32-bit BGRA
-//! buffer: the pixel format Apple's capture and codec hardware works in
-//! natively, so no conversion pass is hidden inside the library.
+//! Frames cross the API boundary as [`BgraFrame`], tightly packed 32-bit BGRA:
+//! the format Apple's capture and codec hardware produces and consumes
+//! natively, so the library performs no colorspace conversion.
 //!
 //! # Permissions
 //!
 //! Camera capture requires the Camera privacy permission, screen capture
-//! requires Screen Recording (System Settings → Privacy & Security). Both are
-//! requested by the OS on first use of the corresponding framework; without
-//! them, opening a capture fails.
+//! requires Screen Recording (System Settings → Privacy & Security). The OS
+//! requests both on first use of the corresponding framework; opening a capture
+//! fails until they are granted.
 
 pub mod hevc;
 
 #[cfg(target_os = "macos")]
 pub mod camera;
 #[cfg(target_os = "macos")]
+mod permission;
+#[cfg(target_os = "macos")]
 pub mod screen;
 #[cfg(target_os = "macos")]
 mod slot;
+
+#[cfg(target_os = "macos")]
+pub use permission::Authorization;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
 

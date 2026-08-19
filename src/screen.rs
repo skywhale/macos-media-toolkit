@@ -1,9 +1,9 @@
 //! ScreenCaptureKit screen capture.
 //!
-//! ScreenCaptureKit only delivers a new sample buffer when the screen content
-//! actually changes, so a static screen produces no frames at all. Consumers
-//! that need a steady cadence (an encoder, say) must decide what to do with the
-//! gap — commonly, re-serving the last frame.
+//! ScreenCaptureKit delivers a sample buffer only when the screen content
+//! changes, so a static screen produces no frames at all. Consumers requiring a
+//! steady cadence must supply their own gap policy; re-serving the last frame is
+//! the usual one.
 //!
 //! Screen Recording permission (System Settings → Privacy & Security → Screen
 //! Recording) is required; without it enumeration and stream start fail.
@@ -12,12 +12,12 @@
 #![expect(clippy::useless_transmute)]
 
 use crate::{
-    BgraFrame,
+    Authorization, BgraFrame,
     slot::{FrameSlot, store_frame},
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use cidre::{
-    arc, cm, cv, define_obj_type, dispatch, ns, objc, sc,
+    arc, cg, cm, cv, define_obj_type, dispatch, ns, objc, sc,
     sc::stream::{Delegate as _, Output as _},
 };
 use log::*;
@@ -29,10 +29,6 @@ use std::{
     },
     time::Duration,
 };
-
-/// Appended to capture errors that are most likely a missing-permission symptom.
-const PERMISSION_HINT: &str = "Screen Recording permission may be missing (System Settings → \
-                               Privacy & Security → Screen Recording).";
 
 /// How to open a [`ScreenCapture`].
 #[derive(Debug, Clone, PartialEq)]
@@ -54,13 +50,12 @@ pub struct ScreenCaptureConfig {
     pub scales_to_fit: bool,
 }
 
-/// Wrapper letting us move a retained ScreenCaptureKit object out of the
-/// enumeration callback (which runs on a GCD queue) back to the calling thread.
+/// Carries a retained ScreenCaptureKit object from the enumeration callback's
+/// GCD queue back to the calling thread.
 struct SendCell<T>(T);
-// SAFETY: the wrapped value is a retained, immutable ScreenCaptureKit snapshot.
-// It is produced on a GCD queue and handed to exactly one other thread through a
-// channel; only one thread ever touches it at a time, so moving it across the
-// thread boundary is sound.
+// SAFETY: the wrapped value is a retained, immutable ScreenCaptureKit snapshot,
+// produced on a GCD queue and handed to exactly one other thread through a
+// channel. Only one thread touches it at a time, so the move is sound.
 unsafe impl<T> Send for SendCell<T> {}
 
 /// Inner state owned by the Objective-C output object. Shares the latest-frame
@@ -139,8 +134,42 @@ pub struct ScreenCapture {
 }
 
 impl ScreenCapture {
+    /// Whether this process may capture the screen.
+    ///
+    /// CoreGraphics reports only whether access is granted, so a process that
+    /// has never asked cannot be told apart from one the user declined; both
+    /// report [`Authorization::NotDetermined`].
+    pub fn authorization() -> Authorization {
+        if cg::screen_capture_access::preflight() {
+            Authorization::Authorized
+        } else {
+            Authorization::NotDetermined
+        }
+    }
+
+    /// Ask the user for Screen Recording access and report the result.
+    ///
+    /// macOS applies a new grant only at process launch, so a user who grants
+    /// access at this prompt leaves the running process unauthorized until it
+    /// restarts.
+    pub fn request_access() -> Authorization {
+        if cg::screen_capture_access::request() {
+            Authorization::Authorized
+        } else {
+            Authorization::Denied
+        }
+    }
+
     /// Open a display capture stream and start delivering frames.
     pub fn open(config: &ScreenCaptureConfig) -> Result<ScreenCapture> {
+        if Self::authorization() != Authorization::Authorized {
+            bail!(
+                "Screen Recording access has not been granted; call \
+                 ScreenCapture::request_access and relaunch, or grant it in System Settings → \
+                 Privacy & Security → Screen Recording"
+            );
+        }
+
         let ScreenCaptureConfig {
             width,
             height,
@@ -150,8 +179,8 @@ impl ScreenCapture {
             ..
         } = *config;
 
-        // ScreenCaptureKit enumeration is async-only; bridge it to this thread
-        // through a channel.
+        // ScreenCaptureKit enumeration is asynchronous only; a channel bridges it
+        // back to this thread.
         let (tx, rx) = mpsc::channel();
         sc::ShareableContent::current_with_ch(move |content, err| {
             let result = match content {
@@ -165,9 +194,7 @@ impl ScreenCapture {
 
         let content = rx
             .recv_timeout(Duration::from_secs(10))
-            .map_err(|e| {
-                anyhow::anyhow!("timed out querying shareable content ({e}). {PERMISSION_HINT}")
-            })?
+            .map_err(|e| anyhow::anyhow!("timed out querying shareable content: {e}"))?
             .map_err(|e| anyhow::anyhow!("querying shareable content: {e}"))?
             .0;
 
@@ -225,12 +252,8 @@ impl ScreenCapture {
         });
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(None) => {}
-            Ok(Some(err)) => {
-                anyhow::bail!("starting ScreenCaptureKit stream: {err}. {PERMISSION_HINT}")
-            }
-            Err(e) => {
-                anyhow::bail!("timed out starting ScreenCaptureKit stream ({e}). {PERMISSION_HINT}")
-            }
+            Ok(Some(err)) => bail!("starting ScreenCaptureKit stream: {err}"),
+            Err(e) => bail!("timed out starting ScreenCaptureKit stream: {e}"),
         }
 
         info!(
@@ -274,7 +297,7 @@ impl ScreenCapture {
 
 impl Drop for ScreenCapture {
     fn drop(&mut self) {
-        // Fire-and-forget; we don't wait for the async stop to complete.
+        // The asynchronous stop is not awaited.
         self.stream.stop_with_ch(|_| {});
     }
 }

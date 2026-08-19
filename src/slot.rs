@@ -1,6 +1,6 @@
-//! Frame plumbing shared by the macOS backends: copying Core Video pixel
-//! buffers into tightly packed BGRA frames, and handing them from the
-//! framework's dispatch queue to the consumer's thread.
+//! Frame handoff shared by the macOS capture backends: Core Video pixel buffers
+//! are copied into tightly packed BGRA frames on the framework's dispatch queue
+//! and handed to the consumer's thread.
 
 use crate::BgraFrame;
 use cidre::{cm, cv};
@@ -15,10 +15,9 @@ use std::{
 pub(crate) fn copy_pixel_buf_bgra(pb: &mut cv::PixelBuf) -> Option<BgraFrame> {
     let flags = cv::pixel_buffer::LockFlags::READ_ONLY;
 
-    // SAFETY: standard CoreVideo lock/copy/unlock. The base address is valid only
-    // while the buffer is locked; every row is copied out before unlocking, and
-    // reads stay within `height` rows of `width * 4` bytes at `bytes_per_row`
-    // stride.
+    // SAFETY: the base address is valid only while the buffer is locked, and every
+    // row is copied out before unlocking. Callers only pass `_32_BGRA` buffers, for
+    // which `bytes_per_row >= width * 4`, so the `height` rows read stay in bounds.
     unsafe {
         if pb.lock_base_addr(flags).result().is_err() {
             return None;
@@ -46,7 +45,7 @@ pub(crate) fn copy_pixel_buf_bgra(pb: &mut cv::PixelBuf) -> Option<BgraFrame> {
     }
 }
 
-/// Latest-frame slot: the producer (dispatch queue) overwrites, the consumer
+/// Latest-frame slot: the producer (a dispatch queue) overwrites, the consumer
 /// blocks on the [`Condvar`].
 pub(crate) struct FrameSlot {
     frame: Mutex<Option<BgraFrame>>,
