@@ -569,17 +569,31 @@ fn process_slice(
             let mut positives: Vec<&RpsEntry> =
                 new_rps.iter().filter(|e| e.delta_poc > 0).collect();
             positives.sort_by_key(|e| e.delta_poc);
+            // A delta of zero names the current picture and lands in neither
+            // list, so it would vanish from the header while still counting
+            // toward NumPicTotalCurr below.
+            ensure!(
+                negatives.len() + positives.len() == new_rps.len(),
+                "RPS entry has a delta_poc of zero"
+            );
             w.put_ue(negatives.len() as u32);
             w.put_ue(positives.len() as u32);
+            // Entries are emitted as the gap from the previous one. Sorted, a
+            // repeated delta is the only way that gap goes negative, which the
+            // unsigned encoding cannot represent.
             let mut prev = 0i32;
             for e in &negatives {
-                w.put_ue((prev - e.delta_poc - 1) as u32);
+                let gap = prev - e.delta_poc - 1;
+                ensure!(gap >= 0, "RPS entries repeat delta_poc {}", e.delta_poc);
+                w.put_ue(gap as u32);
                 w.put_flag(e.used);
                 prev = e.delta_poc;
             }
             let mut prev = 0i32;
             for e in &positives {
-                w.put_ue((e.delta_poc - prev - 1) as u32);
+                let gap = e.delta_poc - prev - 1;
+                ensure!(gap >= 0, "RPS entries repeat delta_poc {}", e.delta_poc);
+                w.put_ue(gap as u32);
                 w.put_flag(e.used);
                 prev = e.delta_poc;
             }
@@ -707,6 +721,10 @@ pub fn parse_slice(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> Result<SliceInfo
 /// header field and the slice payload byte-for-byte intact. The RPS is always
 /// re-emitted as an inline (non-SPS-indexed) set, which is semantically
 /// equivalent.
+///
+/// Errors if `entries` cannot describe an RPS: a delta of zero names the
+/// current picture, and repeated deltas cannot be encoded as the strictly
+/// increasing distances the syntax requires.
 pub fn rewrite_rps(
     nal: &[u8],
     sps: &SpsInfo,
@@ -865,5 +883,20 @@ mod tests {
             identity, nal,
             "identity rewrite under lists_modification_present must be byte-exact"
         );
+    }
+
+    /// Regression: the RPS is serialized as gaps between consecutive entries, so
+    /// a zero or repeated delta encodes as a negative gap. Unchecked, that wraps
+    /// to a 33-bit Exp-Golomb code, which panics the bit writer in debug builds
+    /// and emits a desynchronized header otherwise.
+    #[test]
+    fn rejects_rps_entries_that_cannot_be_encoded() {
+        let (sps, pps) = (nvenc_like_sps(), PpsInfo::default());
+        let payload = [0x9E, 0x42];
+        let nal = build_nvenc_like_p_slice(44, &NVENC_RPS, &payload, &pps);
+
+        assert!(rewrite_rps(&nal, &sps, &pps, &[e(0, true)]).is_err());
+        assert!(rewrite_rps(&nal, &sps, &pps, &[e(-1, true), e(-1, false)]).is_err());
+        assert!(rewrite_rps(&nal, &sps, &pps, &[e(-1, true), e(-2, false)]).is_ok());
     }
 }
