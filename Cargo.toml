@@ -1,0 +1,19 @@
+[package]
+name = "macos-toolkit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tonarino/macos-toolkit"
+description = "Camera and screen capture plus hardware HEVC encode/decode for macOS (AVFoundation, ScreenCaptureKit, VideoToolbox), with portable HEVC bitstream tools."
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+thiserror = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cidre = "0.16"
+
+[lints.clippy]
+todo = "warn"
