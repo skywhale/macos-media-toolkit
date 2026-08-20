@@ -33,6 +33,8 @@ fn main() -> anyhow::Result<()> {
         "screen recording access is {authorization:?}; grant it and run this again"
     );
 
+    println!("displays: {:?}", ScreenCapture::display_descriptions()?);
+
     let display_index = std::env::args().nth(1).map(|a| a.parse()).transpose()?;
 
     let screen = ScreenCapture::open(&ScreenCaptureConfig {

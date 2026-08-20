@@ -160,6 +160,13 @@ impl ScreenCapture {
         }
     }
 
+    /// Descriptions of the shareable displays, in the order
+    /// [`ScreenCaptureConfig::display_index`] indexes.
+    pub fn display_descriptions() -> Result<Vec<String>> {
+        let content = shareable_content()?;
+        Ok(content.displays().iter().map(describe_display).collect())
+    }
+
     /// Open a display capture stream and start delivering frames.
     pub fn open(config: &ScreenCaptureConfig) -> Result<ScreenCapture> {
         if Self::authorization() != Authorization::Authorized {
@@ -179,25 +186,7 @@ impl ScreenCapture {
             ..
         } = *config;
 
-        // ScreenCaptureKit enumeration is asynchronous only; a channel bridges it
-        // back to this thread.
-        let (tx, rx) = mpsc::channel();
-        sc::ShareableContent::current_with_ch(move |content, err| {
-            let result = match content {
-                Some(c) => Ok(SendCell(c.retained())),
-                None => Err(err
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "no shareable content".to_string())),
-            };
-            let _ = tx.send(result);
-        });
-
-        let content = rx
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|e| anyhow::anyhow!("timed out querying shareable content: {e}"))?
-            .map_err(|e| anyhow::anyhow!("querying shareable content: {e}"))?
-            .0;
-
+        let content = shareable_content()?;
         let displays = content.displays();
         let display_count = displays.len();
         let index = config.display_index.unwrap_or(0);
@@ -208,12 +197,7 @@ impl ScreenCapture {
             )
         })?;
 
-        let display_desc = format!(
-            "display {:?} ({}x{})",
-            display.display_id(),
-            display.width(),
-            display.height()
-        );
+        let display_desc = describe_display(&display);
 
         let filter = sc::ContentFilter::with_display_excluding_windows(&display, &ns::Array::new());
 
@@ -293,6 +277,37 @@ impl ScreenCapture {
     pub fn display_description(&self) -> &str {
         &self.display_desc
     }
+}
+
+/// The current shareable-content snapshot. ScreenCaptureKit enumeration is
+/// asynchronous only; a channel bridges it back to the calling thread.
+fn shareable_content() -> Result<arc::R<sc::ShareableContent>> {
+    let (tx, rx) = mpsc::channel();
+    sc::ShareableContent::current_with_ch(move |content, err| {
+        let result = match content {
+            Some(c) => Ok(SendCell(c.retained())),
+            None => Err(err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "no shareable content".to_string())),
+        };
+        let _ = tx.send(result);
+    });
+
+    let content = rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|e| anyhow::anyhow!("timed out querying shareable content: {e}"))?
+        .map_err(|e| anyhow::anyhow!("querying shareable content: {e}"))?;
+    Ok(content.0)
+}
+
+/// Human-readable description of a display, e.g. "display 1 (3456x2234)".
+fn describe_display(display: &sc::Display) -> String {
+    format!(
+        "display {:?} ({}x{})",
+        display.display_id(),
+        display.width(),
+        display.height()
+    )
 }
 
 impl Drop for ScreenCapture {

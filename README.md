@@ -13,7 +13,7 @@ the library performs no colorspace conversion.
 
 - `camera` — an AVFoundation capture session on a chosen device, with explicit
   format and frame-rate pinning.
-- `screen` — a ScreenCaptureKit stream capturing one display.
+- `screen` — a ScreenCaptureKit stream capturing one of the enumerable displays.
 - `videotoolbox` — hardware HEVC encode and decode, speaking Annex B with
   in-band parameter sets on keyframes.
 - `hevc` — Annex B framing, parameter-set extraction, and HEVC slice-header
