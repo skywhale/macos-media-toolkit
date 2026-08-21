@@ -27,9 +27,14 @@ library performs no colorspace conversion.
 
 ## Status
 
-0.1, and a personal project. Every part of it runs on real hardware and carries
-the workarounds that took real hardware to find, but the API is unstable and
-will keep changing as more of it gets used.
+0.1, and a personal project. The API is unstable and will keep changing as more
+of it gets used.
+
+Some of what looks over-elaborate here is load-bearing. AVFoundation ignores a
+frame-rate request unless you also pick the capture format yourself;
+VideoToolbox refuses frames that NVDEC would have decoded; a capture started
+without permission returns no frames and no error. Each of those is explained
+where it is handled.
 
 ## Camera
 
@@ -58,9 +63,9 @@ loop {
 }
 ```
 
-Delivery is latest-frame, drop-old: a frame that is not taken before the next
-one arrives is overwritten, so a slow consumer falls behind in latency, never in
-backlog.
+Only the newest frame is kept. A frame you do not take before the next one
+arrives is thrown away, so a slow reader skips frames rather than working
+through a growing queue of stale ones.
 
 ## Screen
 

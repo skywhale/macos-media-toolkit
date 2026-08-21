@@ -259,9 +259,9 @@ impl ScreenCapture {
     /// Block up to `timeout` for the next frame.
     ///
     /// ScreenCaptureKit delivers a frame only when the screen content changes,
-    /// so a static screen yields `None` however long the timeout is. Delivery is
-    /// latest-frame, drop-old: a frame that is not taken before the next one
-    /// arrives is overwritten.
+    /// so a static screen yields `None` however long the timeout is. Only the
+    /// newest frame is kept: one not taken before the next arrives is thrown
+    /// away.
     pub fn take_frame(&self, timeout: Duration) -> Option<BgraFrame> {
         self.slot.take_blocking(timeout)
     }

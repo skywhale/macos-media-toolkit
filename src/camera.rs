@@ -293,11 +293,12 @@ impl Camera {
 
     /// Block up to `timeout` for the next frame.
     ///
-    /// Delivery is latest-frame, drop-old: a frame that is not taken before the
-    /// next one arrives is overwritten. Frames arrive with a few milliseconds of
-    /// dispatch-queue scheduling jitter, so a timeout of exactly one frame
-    /// interval routinely expires just before the next frame lands — budget more
-    /// than one interval.
+    /// Only the newest frame is kept: one not taken before the next arrives is
+    /// thrown away, so a slow caller skips frames rather than building a queue.
+    ///
+    /// Frames do not arrive on an exact schedule — the delivery queue can run a
+    /// few milliseconds late — so a timeout of exactly one frame interval often
+    /// expires just before the next frame lands. Allow more than one interval.
     pub fn take_frame(&self, timeout: Duration) -> Option<BgraFrame> {
         self.slot.take_blocking(timeout)
     }
