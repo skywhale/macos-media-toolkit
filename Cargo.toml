@@ -9,6 +9,11 @@ description = "Camera, screen capture and hardware HEVC codecs for macOS."
 keywords = ["macos", "avfoundation", "screencapturekit", "videotoolbox", "hevc"]
 categories = ["multimedia::video", "multimedia::encoding", "os::macos-apis", "api-bindings"]
 
+# docs.rs builds on Linux, where everything but `hevc` is cfg'd out.
+[package.metadata.docs.rs]
+default-target = "aarch64-apple-darwin"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+
 [dependencies]
 anyhow = "1"
 log = "0.4"
