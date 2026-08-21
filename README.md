@@ -125,25 +125,30 @@ from the first keyframe's parameter sets and returns
 
 ### VideoToolbox vs NVDEC loss behavior
 
-The two hardware decoders disagree about missing references, and the difference
-is fatal over a lossy link.
+The two hardware decoders disagree about what to do with a missing reference,
+and over a lossy link that difference stops the video for good.
 
-When a P-slice's reference picture set names a picture that is missing from the
-decoded picture buffer — lost in transport, or skipped while the decoder waited
-for a recovery keyframe — NVDEC conceals the missing reference and decodes an
-artifacted frame. VideoToolbox rejects the slice outright with
-`kVTVideoDecoderBadDataErr` (-12909). The consequence is a livelock: after each
-recovery keyframe, the first P-slice predicts from an intermediate picture the
-decoder never decoded, fails, and arms the next keyframe request — forever.
+Most frames are described in terms of earlier frames. When one of those earlier
+frames never arrived — dropped in transit, or skipped while the decoder was
+waiting to resynchronize — NVDEC substitutes the closest thing it has and
+produces a frame with visible artifacts. VideoToolbox refuses the frame instead,
+with `kVTVideoDecoderBadDataErr` (-12909).
 
-`HevcDecoder` therefore tracks the picture order counts presumed to be in the
-hardware DPB and, before submitting an access unit, repairs slices naming
-pictures it never decoded: a missing *used* reference is remapped to the newest
-picture actually in the DPB, and keep-alive entries for pictures that were never
-decoded are dropped. Every other header field and the whole slice payload are
-preserved byte for byte. The repair is fail-open — a slice the parser does not
-understand is submitted untouched, falling back to ordinary keyframe recovery —
-and can be turned off with `DecoderConfig { conceal_missing_references: false }`.
+Refusing is what makes it fatal, because the obvious recovery does not work. The
+decoder asks for a keyframe so it can start fresh and decodes it, but the frame
+right after that keyframe still refers back to something older — a frame skipped
+while waiting. So it fails too, and asks for another keyframe, and the same
+thing happens again. The picture never returns.
+
+`HevcDecoder` avoids this by keeping track of which frames the hardware decoder
+is actually holding, and fixing up each frame's references before handing it
+over: a reference to a frame that is gone is repointed at the newest frame the
+decoder does have, and references kept purely for bookkeeping are dropped when
+they name frames that were never decoded. Everything else in the header, and the
+whole compressed payload, is left byte for byte intact. A frame the parser does
+not understand is passed through untouched, which simply falls back to the usual
+keyframe recovery. Set `DecoderConfig { conceal_missing_references: false }` to
+turn the fixing-up off.
 
 The machinery behind this lives in the `hevc` module and is usable on its own on
 any platform: `parse_sps`, `parse_pps`, `parse_slice` and `rewrite_rps`, plus

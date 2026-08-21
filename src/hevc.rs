@@ -22,11 +22,13 @@
 //! — because the picture was lost in transport or was skipped while the
 //! decoder waited for a recovery keyframe — NVDEC conceals the missing
 //! reference and decodes a (possibly artifacted) frame, while VideoToolbox
-//! rejects the slice outright with `kVTVideoDecoderBadDataErr` (-12909). On a
-//! lossy link this makes keyframe recovery loop forever: the first P-slice
-//! submitted after each recovery keyframe predicts from an intermediate
-//! picture the decoder never decoded, fails, and triggers the next keyframe
-//! request.
+//! rejects the slice outright with `kVTVideoDecoderBadDataErr` (-12909).
+//!
+//! Over a lossy link that rejection never resolves. The decoder asks for a
+//! keyframe and decodes it, but the next P-slice still references a picture
+//! from before that keyframe, which the decoder skipped while it was waiting.
+//! That slice fails too and asks for another keyframe, and the cycle
+//! repeats.
 //!
 //! [`rewrite_rps`] rewrites a slice header's RPS in place (slice payload
 //! copied verbatim), which lets a decoder emulate NVDEC's concealment: remap a
