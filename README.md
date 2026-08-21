@@ -140,15 +140,21 @@ right after that keyframe still refers back to something older — a frame skipp
 while waiting. So it fails too, and asks for another keyframe, and the same
 thing happens again. The picture never returns.
 
-`HevcDecoder` avoids this by keeping track of which frames the hardware decoder
-is actually holding, and fixing up each frame's references before handing it
-over: a reference to a frame that is gone is repointed at the newest frame the
-decoder does have, and references kept purely for bookkeeping are dropped when
-they name frames that were never decoded. Everything else in the header, and the
-whole compressed payload, is left byte for byte intact. A frame the parser does
-not understand is passed through untouched, which simply falls back to the usual
-keyframe recovery. Set `DecoderConfig { conceal_missing_references: false }` to
-turn the fixing-up off.
+`HevcDecoder` works around this. It keeps track of which frames the hardware
+decoder is still holding, and before handing over a frame it edits that frame's
+list of references:
+
+- A reference to a frame that is gone is pointed at the newest frame the decoder
+  does still have — roughly what NVDEC would have substituted anyway.
+- A frame also carries references it never predicts from, there only to stop the
+  decoder discarding those frames. The ones naming frames that were never
+  decoded are removed.
+
+Nothing else changes: every other field in the header, and the whole compressed
+payload, is copied through byte for byte. A frame the parser cannot make sense
+of is handed over untouched, which just falls back to the usual keyframe
+recovery. `DecoderConfig { conceal_missing_references: false }` turns the whole
+thing off.
 
 The machinery behind this lives in the `hevc` module and is usable on its own on
 any platform: `parse_sps`, `parse_pps`, `parse_slice` and `rewrite_rps`, plus
