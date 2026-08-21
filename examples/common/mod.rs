@@ -1,7 +1,7 @@
 //! Helpers shared by the examples; not part of the library's API.
 
 use anyhow::{Context, Result};
-use macos_toolkit::BgraFrame;
+use macos_media_toolkit::BgraFrame;
 use std::{fs, path::Path};
 
 /// Write a frame as a binary PPM (P6), converting BGRA to RGB. Every image

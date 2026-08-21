@@ -1,15 +1,20 @@
-# macos-toolkit
+# macos-media-toolkit
 
-Camera and screen capture plus hardware HEVC encode/decode for macOS
-(AVFoundation, ScreenCaptureKit, VideoToolbox), with portable HEVC bitstream
-tools.
+Rust interops for a few of Apple's media frameworks: AVFoundation camera
+capture, ScreenCaptureKit screen capture, VideoToolbox HEVC encode and decode,
+and a portable HEVC bitstream module.
 
-The crate wraps Apple's media frameworks behind blocking, frames-in / frames-out
-APIs: a capture is opened and drained, and the codec exchanges byte buffers. No
-async runtime, GPU context, actor framework or caller-supplied callback is
-involved. Frames cross the boundary as `BgraFrame`, tightly packed 32-bit BGRA —
-the format Apple's capture and codec hardware produces and consumes natively, so
-the library performs no colorspace conversion.
+The selection is arbitrary. Each piece exists because a project of mine needed
+it, so coverage is narrow and the API follows those needs rather than the
+frameworks' full surface. Anything not listed below is absent because nothing
+has demanded it yet.
+
+What is here wraps the frameworks behind blocking, frames-in / frames-out APIs:
+a capture is opened and drained, and the codec exchanges byte buffers. No async
+runtime, GPU context, actor framework or caller-supplied callback is involved.
+Frames cross the boundary as `BgraFrame`, tightly packed 32-bit BGRA — the
+format Apple's capture and codec hardware produces and consumes natively, so the
+library performs no colorspace conversion.
 
 - `camera` — an AVFoundation capture session on a chosen device, with explicit
   format and frame-rate pinning.
@@ -22,14 +27,14 @@ the library performs no colorspace conversion.
 
 ## Status
 
-0.1, extracted from code running in production at [tonari](https://tonari.no).
-The implementation is proven on real hardware; the API is not stable yet and
-will change as more of it is used outside its original home.
+0.1, and a personal project. Every part of it runs on real hardware and carries
+the workarounds that took real hardware to find, but the API is unstable and
+will keep changing as more of it gets used.
 
 ## Camera
 
 ```rust
-use macos_toolkit::{Authorization, camera::{Camera, CameraConfig}};
+use macos_media_toolkit::{Authorization, camera::{Camera, CameraConfig}};
 use std::time::Duration;
 
 // AVFoundation delivers no frames at all without permission, so resolve it
@@ -60,7 +65,7 @@ backlog.
 ## Screen
 
 ```rust
-use macos_toolkit::{Authorization, screen::{ScreenCapture, ScreenCaptureConfig}};
+use macos_media_toolkit::{Authorization, screen::{ScreenCapture, ScreenCaptureConfig}};
 use std::time::Duration;
 
 // Screen Recording is granted per launch: a user who accepts this prompt
@@ -89,7 +94,7 @@ condition and the capture must be reopened.
 ## Encode and decode
 
 ```rust
-use macos_toolkit::videotoolbox::{DecoderConfig, EncoderConfig, HevcDecoder, HevcEncoder};
+use macos_media_toolkit::videotoolbox::{DecoderConfig, EncoderConfig, HevcDecoder, HevcEncoder};
 
 let mut encoder = HevcEncoder::new(&EncoderConfig {
     width: 1280,
@@ -156,13 +161,14 @@ library's diagnostics.
 
 ## Prior art
 
-Parts of this space are covered elsewhere. This crate addresses the parts that
-are not, and unifies the delivery model across all of them.
+Much of this space is covered elsewhere, sometimes better. These are the notes
+from deciding whether to write any of it, and they should point you at a
+narrower crate when one fits.
 
 - Screen capture is the crowded corner:
   [screencapturekit](https://github.com/doom-fish/screencapturekit-rs) is
-  actively maintained and exposes the same ScreenCaptureKit controls, and is the
-  better choice when only screen capture is needed.
+  actively maintained and exposes the same ScreenCaptureKit controls. Prefer it
+  unless you want the camera and codec pieces under one delivery model.
 - Camera capture with working frame-rate control is not covered:
   [nokhwa](https://github.com/l1npengtul/nokhwa)'s AVFoundation backend
   documents its FPS adjustment as non-functional, and the rest of the field is
@@ -172,9 +178,9 @@ are not, and unifies the delivery model across all of them.
   [videotoolbox](https://github.com/doom-fish/videotoolbox-rs)) but none offer
   synchronous Annex B in/out with in-band parameter sets — the shape a network
   streaming pipeline wants.
-- HEVC slice-header parsing with bit-exact *rewriting* has no other known
-  implementation; [hevc_parser](https://github.com/quietvoid/hevc_parser) stops
-  parsing before the slice-header RPS and is parse-only.
+- HEVC slice-header parsing with bit-exact *rewriting* is the one part I found
+  no substitute for; [hevc_parser](https://github.com/quietvoid/hevc_parser)
+  stops parsing before the slice-header RPS and is parse-only.
 
 The Apple bindings underneath are [cidre](https://github.com/yury/cidre) —
 actively developed and proven in shipping software, but a single-maintainer

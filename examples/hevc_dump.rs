@@ -8,7 +8,7 @@
 //! Uses only the `hevc` module, so it builds and runs on any platform.
 
 use anyhow::{Context, Result};
-use macos_toolkit::hevc;
+use macos_media_toolkit::hevc;
 use std::io::{BufWriter, Write};
 
 fn main() -> Result<()> {

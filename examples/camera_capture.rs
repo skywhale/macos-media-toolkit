@@ -15,7 +15,7 @@ mod common;
 
 #[cfg(target_os = "macos")]
 fn main() -> anyhow::Result<()> {
-    use macos_toolkit::{
+    use macos_media_toolkit::{
         Authorization,
         camera::{Camera, CameraConfig},
     };

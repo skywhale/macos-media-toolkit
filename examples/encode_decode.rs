@@ -15,7 +15,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() -> anyhow::Result<()> {
-    use macos_toolkit::{
+    use macos_media_toolkit::{
         BgraFrame,
         videotoolbox::{DecodeError, DecoderConfig, EncoderConfig, HevcDecoder, HevcEncoder},
     };
