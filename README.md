@@ -12,15 +12,11 @@ Rust interops for Apple's media frameworks: AVFoundation camera capture,
 ScreenCaptureKit screen capture, VideoToolbox HEVC encode and decode, and a
 portable HEVC bitstream module.
 
-The four cover one path end to end — capture a frame, encode it, put it on a
-wire, decode it on the far side — under a single delivery model. Scope follows
-that path: the API exposes what a streaming pipeline needs rather than the
-frameworks' full surface.
-
 They wrap the frameworks behind blocking, frames-in / frames-out APIs: a capture
 is opened and drained, and the codec exchanges byte buffers. No async runtime,
 GPU context, actor framework or caller-supplied callback is involved. Frames
-cross the boundary as `BgraFrame`, tightly packed 32-bit BGRA — the format Apple's capture and codec hardware produces and consumes natively, so the
+cross the boundary as `BgraFrame`, tightly packed 32-bit BGRA — the format
+Apple's capture and codec hardware produces and consumes natively, so the
 library performs no colorspace conversion.
 
 - `camera` — an AVFoundation capture session on a chosen device, with explicit
