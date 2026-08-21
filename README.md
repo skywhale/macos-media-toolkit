@@ -1,19 +1,18 @@
 # macos-media-toolkit
 
-Rust interops for a few of Apple's media frameworks: AVFoundation camera
-capture, ScreenCaptureKit screen capture, VideoToolbox HEVC encode and decode,
-and a portable HEVC bitstream module.
+Rust interops for Apple's media frameworks: AVFoundation camera capture,
+ScreenCaptureKit screen capture, VideoToolbox HEVC encode and decode, and a
+portable HEVC bitstream module.
 
-The selection is arbitrary. Each piece exists because a project of mine needed
-it, so coverage is narrow and the API follows those needs rather than the
-frameworks' full surface. Anything not listed below is absent because nothing
-has demanded it yet.
+The four cover one path end to end — capture a frame, encode it, put it on a
+wire, decode it on the far side — under a single delivery model. Scope follows
+that path: the API exposes what a streaming pipeline needs rather than the
+frameworks' full surface.
 
-What is here wraps the frameworks behind blocking, frames-in / frames-out APIs:
-a capture is opened and drained, and the codec exchanges byte buffers. No async
-runtime, GPU context, actor framework or caller-supplied callback is involved.
-Frames cross the boundary as `BgraFrame`, tightly packed 32-bit BGRA — the
-format Apple's capture and codec hardware produces and consumes natively, so the
+They wrap the frameworks behind blocking, frames-in / frames-out APIs: a capture
+is opened and drained, and the codec exchanges byte buffers. No async runtime,
+GPU context, actor framework or caller-supplied callback is involved. Frames
+cross the boundary as `BgraFrame`, tightly packed 32-bit BGRA — the format Apple's capture and codec hardware produces and consumes natively, so the
 library performs no colorspace conversion.
 
 - `camera` — an AVFoundation capture session on a chosen device, with explicit
@@ -166,9 +165,8 @@ library's diagnostics.
 
 ## Prior art
 
-Much of this space is covered elsewhere, sometimes better. These are the notes
-from deciding whether to write any of it, and they should point you at a
-narrower crate when one fits.
+Parts of this space are covered elsewhere. These notes say where a narrower
+crate is the better fit, and where this one covers ground the others do not.
 
 - Screen capture is the crowded corner:
   [screencapturekit](https://github.com/doom-fish/screencapturekit-rs) is
