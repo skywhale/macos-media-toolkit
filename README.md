@@ -1,5 +1,9 @@
 # macos-media-toolkit
 
+[![crates.io](https://img.shields.io/crates/v/macos-media-toolkit.svg)](https://crates.io/crates/macos-media-toolkit)
+[![docs.rs](https://docs.rs/macos-media-toolkit/badge.svg)](https://docs.rs/macos-media-toolkit)
+[![license](https://img.shields.io/crates/l/macos-media-toolkit.svg)](#license)
+
 > Disclaimer: Much of the code here was written by Claude, to my design and
 > under my review. The HEVC bitstream logic is covered by tests; the framework
 > wrappers have been run against real hardware.
