@@ -5,7 +5,9 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/skywhale/macos-media-toolkit"
-description = "Camera and screen capture plus hardware HEVC encode/decode for macOS (AVFoundation, ScreenCaptureKit, VideoToolbox), with portable HEVC bitstream tools."
+description = "Camera, screen capture and hardware HEVC codecs for macOS."
+keywords = ["macos", "avfoundation", "screencapturekit", "videotoolbox", "hevc"]
+categories = ["multimedia::video", "multimedia::encoding", "os::macos-apis", "api-bindings"]
 
 [dependencies]
 anyhow = "1"
