@@ -1,5 +1,9 @@
 # macos-media-toolkit
 
+> Roughly 80% of the code here was written by Claude, to my design and under my
+> review. The HEVC bitstream logic is covered by tests; the framework wrappers
+> have been run against real hardware.
+
 Rust interops for Apple's media frameworks: AVFoundation camera capture,
 ScreenCaptureKit screen capture, VideoToolbox HEVC encode and decode, and a
 portable HEVC bitstream module.
